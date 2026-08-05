@@ -1,0 +1,101 @@
+# ─────────────────────────────────────────────────────────────────────
+# S-012 · SBA 7(a) & 504 FOIA loan data
+# First source onto the platform (ADR-009). US small-business lending
+# with actual charge-off amounts — a genuine SME PD/LGD dataset.
+# ─────────────────────────────────────────────────────────────────────
+
+id: S-012
+name: SBA 7(a) and 504 FOIA loan data
+publisher: U.S. Small Business Administration
+tier: 1                      # open government data
+archetype: A                 # bulk file download (with C-style link discovery)
+
+landing_page: https://data.sba.gov/en/dataset/7-a-504-foia
+data_dictionary: https://data.sba.gov/en/dataset/7-a-504-foia/resource/6898b986-a895-47b4-bb7e-c6b286b23a7b
+
+portfolios: [sme]
+parameters: [pd, lgd, ead]
+geography: US
+coverage:
+  from: 1991-10-01           # FY1992 onward
+  to: current
+grain: loan                  # one row per approved loan
+schedule: quarterly          # SBA refreshes quarterly
+expected_rows: ~1_790_000    # 7(a) programme, all decades combined
+
+# ── Discovery ────────────────────────────────────────────────────────
+# Download filenames embed an "as of" date that changes each refresh
+# (…asof-250331.csv → …asof-251231.csv), so URLs must NOT be hardcoded.
+# Resource UUIDs are stable; resolve each resource page to its current
+# download link at fetch time.
+discovery:
+  method: resource_page_scrape
+  resources:
+    - key: 7a_fy2020_present
+      uuid: d67d3ccb-2002-4134-a288-481b51cd3479
+    - key: 7a_fy2010_fy2019
+      uuid: 3f838176-6060-44db-9c91-b4acafbcb28c
+    # FY2000–FY2009, FY1991–FY1999 and the two 504 files: UUIDs to be
+    # confirmed on first successful crawl of the landing page.
+  resource_url_template: "https://data.sba.gov/en/dataset/7-a-504-foia/resource/{uuid}"
+
+# ── Fetch notes ──────────────────────────────────────────────────────
+# 2026-07-30: data.sba.gov returned HTTP 404 to all programmatic requests
+# from the dev sandbox (landing page, direct file URL, and CKAN-style API
+# paths) while serving its homepage normally, and while search engines
+# hold the same URLs indexed. Consistent with bot-blocking cloaked as 404,
+# or geo-blocking of non-US egress.
+# Resolution order to test from a US-based GitHub Actions runner:
+#   1. plain httpx with browser-like headers   (likely sufficient if geo-blocked)
+#   2. catalog.data.gov mirror of the same dataset
+#   3. browser automation (archetype F)
+fetch:
+  headers:
+    User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    Accept-Language: "en-US,en;q=0.9"
+  rate_limit_seconds: 2
+  timeout_seconds: 300
+  retries: 3
+  fallbacks:
+    - catalog.data.gov mirror
+    - browser_automation
+
+# ── Targets ──────────────────────────────────────────────────────────
+targets:
+  bronze: "bronze/S-012/{yyyy}/{mm}/{dd}/{filename}"
+  silver: silver.sba_7a_loans
+  gold:
+    - gold.sme_loss_panel
+
+# ── Key fields (per SBA data dictionary) ─────────────────────────────
+key_fields:
+  identifiers: [AsOfDate, Program, BorrName, BorrState]
+  origination: [ApprovalDate, ApprovalFiscalYear, GrossApproval, SBAGuaranteedApproval, TermInMonths, InitialInterestRate]
+  borrower: [NaicsCode, BusinessType, JobsSupported, FranchiseCode]
+  lender: [BankName, BankState]
+  outcome: [LoanStatus, PaidInFullDate, ChargeOffDate, GrossChargeOffAmount]
+
+# ── Quality checks ───────────────────────────────────────────────────
+reconciliation:
+  - check: row_count_total
+    against: expected_rows
+    tolerance: 0.05
+  - check: sum(GrossApproval)
+    against: published_programme_total       # ≈ $517bn across 7(a) history
+    tolerance: 0.02
+  - check: charge_off_rate
+    expression: count(ChargeOffDate is not null) / count(*)
+    plausible_range: [0.02, 0.25]            # sanity band, not a published figure
+
+validations:
+  - GrossApproval > 0
+  - SBAGuaranteedApproval <= GrossApproval
+  - ApprovalDate <= coalesce(ChargeOffDate, ApprovalDate)
+  - LoanStatus in [PIF, CHGOFF, CANCLD, EXEMPT, COMMIT, NOT FUNDED]
+
+notes: >
+  Charge-off amount ÷ gross approval yields a usable SME LGD distribution,
+  though the SBA guarantee structure means it is a loss-to-SBA measure rather
+  than a lender-level LGD — document that caveat wherever the gold panel is used.
+  Covers three recessions (1990s, 2008-09, 2020), so vintage analysis is viable.

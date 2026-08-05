@@ -1,0 +1,76 @@
+# ── Secrets — never commit ───────────────────────────────────────────
+# Broad by design: it is far cheaper to ignore a harmless file by accident
+# than to leak one credential. If a real project file is caught here,
+# whitelist it explicitly with a "!" line rather than loosening a pattern.
+.env
+.env.*
+*.key
+*.pem
+*.pfx
+*.p12
+credentials.json
+secrets.yaml
+secrets.yml
+
+# Anything whose name suggests it holds credentials
+*token*.txt
+*token*.json
+*secret*.txt
+*secret*.json
+*credential*
+*password*
+*apikey*
+*api_key*
+*_creds*
+
+# Belt-and-braces: ignore EVERY .txt at the repository root, then allow back
+# the handful that are genuinely project files. Name-based patterns above can
+# always be outguessed by an innocuous filename (motherduck.txt, openrouter.txt);
+# this rule cannot. Root-level .txt files are almost never source code.
+/*.txt
+!requirements.txt
+!requirements-dev.txt
+
+# Dedicated scratch space for credential notes, always ignored
+.secrets/
+
+# ── Data — lives in the cloud, never in git ──────────────────────────
+data/
+bronze/
+silver/
+gold/
+*.parquet
+*.duckdb
+*.db
+# Large raw formats (small fixtures under tests/fixtures/ are allowed)
+*.csv
+*.xlsx
+*.zip
+*.pdf
+!tests/fixtures/**
+!credit_risk_data_tracker.xlsx
+
+# ── Python ───────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# ── Editors / OS ─────────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Scratch ──────────────────────────────────────────────────────────
+scratch/
+tmp/
+*.log
