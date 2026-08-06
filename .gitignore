@@ -74,3 +74,6 @@ desktop.ini
 scratch/
 tmp/
 *.log
+
+# Exports (regenerated on demand)
+exports/

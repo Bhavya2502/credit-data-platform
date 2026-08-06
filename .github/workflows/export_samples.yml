@@ -1,0 +1,41 @@
+name: Export samples
+
+# Dumps warehouse contents to CSV and publishes them as a downloadable artifact.
+on:
+  workflow_dispatch:
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "duckdb~=1.1" "pandas~=2.2" "boto3~=1.35" "pyyaml~=6.0"
+
+      - name: Export
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: python scripts/export_samples.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: warehouse-export
+          path: exports/
+          retention-days: 30
