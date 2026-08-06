@@ -179,6 +179,50 @@ immediately after.
 
 ---
 
+### ADR-011 — First source switched from SBA 7(a) to FDIC BankFind
+**Date:** 2026-08-06 · **Status:** Accepted · **Supersedes:** ADR-009
+
+**Context.** ADR-009 chose SBA 7(a) as the first source specifically because it looked *easy* —
+open government data in bulk CSV — so that platform plumbing could be proven without also
+debugging extraction. Preflight testing invalidated that premise:
+
+| Route | Dev sandbox | GitHub runner (Virginia, US, Azure) |
+|---|---|---|
+| `data.sba.gov` landing page | HTTP 404 | HTTP 404 |
+| `data.sba.gov` direct CSV | HTTP 404 | HTTP 404 |
+| `catalog.data.gov` (federal mirror) | — | **HTTP 200** |
+
+Identical 404s from two unrelated networks — one of them a US IP — while the site serves its
+homepage normally and search engines hold the same URLs indexed. Geo-blocking is therefore ruled
+out; the signature is a WAF blocking datacenter IP ranges and cloaking the block as a 404.
+
+Comparison probes confirmed this is an SBA anomaly rather than a general condition:
+
+| Source | Result |
+|---|---|
+| FDIC BankFind API | **HTTP 200** — no auth, 4,560 banks returned |
+| ECB Data Portal | **HTTP 200** |
+| **IBBI (our flagship target)** | **HTTP 200** — 138 KB page |
+
+**Decision.** Prove the stack on **FDIC BankFind** (S-057) instead. No authentication, a clean
+REST API, and genuine credit-risk content — charge-offs, loan-loss reserves and nonperforming
+assets for every US bank, quarterly since 1992. Then proceed to IBBI as planned.
+
+SBA is **deferred, not abandoned** (see runbook). Any of three routes will likely work when we
+return to it: the data.gov mirror's own resource links, a residential-proxy fetch service, or
+manual-assist download. None is worth solving before the platform exists.
+
+**Consequences.**
+- The original intent of ADR-009 is preserved and better served — FDIC is genuinely easy.
+- We keep an SME loss dataset on the roadmap (SBA remains the only free source with
+  loan-level small-business charge-off amounts).
+- Establishes a useful precedent: **preflight-probe a source before committing to it**, since
+  accessibility is not predictable from how open the data nominally is.
+- Adds "datacenter-IP WAF blocking" to the known-obstacles list alongside CAPTCHA-gating
+  (rbidocs) and bot-blocking (CIBIL).
+
+---
+
 ### ADR-010 — Hybrid working mode
 **Date:** 2026-07-30 · **Status:** Accepted
 
