@@ -1,0 +1,110 @@
+# ─────────────────────────────────────────────────────────────────────
+# S-057 · FDIC BankFind Suite — bank financials
+# First source onto the platform (ADR-011, superseding ADR-009).
+# Bank-level quarterly credit performance for every US insured institution.
+# ─────────────────────────────────────────────────────────────────────
+
+id: S-057
+name: FDIC BankFind Suite — institution financials
+publisher: Federal Deposit Insurance Corporation
+tier: 1                       # US public domain
+archetype: B                  # structured REST API
+
+landing_page: https://banks.data.fdic.gov/
+api_base: https://api.fdic.gov/banks/financials
+api_docs: https://api.fdic.gov/banks/docs
+
+portfolios: [mortgage, cre, sme, corporate, cards, consumer, agri]
+parameters: [pd, ead, provisioning]
+geography: US
+grain: institution_quarter    # one row per bank (CERT) per report date (REPDTE)
+schedule: quarterly           # FDIC publishes ~8-10 weeks after quarter end
+
+coverage:
+  from: 1992-12-31
+  to: current
+  verified_2026_08_06:
+    "19921231": 14028 institutions
+    "20081231": 8395
+    "20260331": 4352
+  note: >
+    Institution count falls from 14,028 (1992) to 4,352 (2026) — US banking
+    consolidation. Panel is unbalanced by construction; treat entries/exits as
+    real events (mergers, failures) rather than data gaps.
+
+# ── Fetch ────────────────────────────────────────────────────────────
+# No authentication. One request per quarter; limit=10000 covers every era
+# (max observed 14,028 in 1992 — paginate above 10k).
+fetch:
+  method: GET
+  params:
+    filters: "REPDTE:{repdte}"
+    limit: 10000
+    format: json
+  headers:
+    User-Agent: "credit-data-platform/0.1 (internal research)"
+  rate_limit_seconds: 1
+  timeout_seconds: 120
+  retries: 3
+  # Bronze stores the full 161-field response gzipped (ADR-003: raw and
+  # immutable). Silver projects the curated credit-risk subset below.
+  bronze_compression: gzip
+
+# ── Targets ──────────────────────────────────────────────────────────
+targets:
+  bronze: "bronze/S-057/{yyyy}/{mm}/{dd}/fdic_financials_{repdte}.json.gz"
+  silver: silver.fdic_bank_financials
+  gold:
+    - gold.anchor_series          # US bank credit performance anchors
+
+# ── Curated silver fields ────────────────────────────────────────────
+# Field availability varies by era (e.g. CET1 ratios only post-Basel III).
+# Missing fields are stored NULL, never dropped or defaulted.
+fields:
+  identity:    [CERT, REPDTE, NAME, CITY, STALP, STNAME, BKCLASS, SPECGRPDESC, ACTIVE, CB]
+  size:        [ASSET, DEP, EQTOT, LNLSNET]
+  credit_core: [LNATRESR, ELNATR, NTLNLS, NTLNLSR, NAASSET, NALTOT, P3ASSET, P9ASSET,
+                NCLNLSR, NPERFV, ORE]
+  # Net charge-off rates by loan category — the portfolio-level PD/LGD proxies
+  nco_by_category: [NTRER, NTRERESR, NTREMULR, NTRENRSR, NTRECOSR, NTCOMRER,
+                    IDNTCIR, IDNTCONR, NTALLOTHR]
+  # Noncurrent (90+ dpd or nonaccrual) rates by loan category
+  noncurrent_by_category: [NCRER, NCRERESR, NCREMULR, NCRENRER, NCRECONR, NCCOMRER,
+                           IDNCCIR, IDNCCONR, IDNCOTHR]
+  # NB: auto is SZLAUTO (no "N") — inconsistent with its siblings in the API
+  loan_mix:    [SZLNRES, SZLNCI, SZLNCON, SZLNCRCD, SZLAUTO, SZLNHEL, SZLNOTH]
+  capital:     [RBC1AAJ, RBCRWAJ, IDT1RWAJR, IDT1CER]
+  context:     [ROA, ROE, NIMY]
+
+# ── Quality checks ───────────────────────────────────────────────────
+reconciliation:
+  # 1. Extraction completeness — parsed rows must equal the API's own count
+  - check: row_count_matches_api_total
+    against: meta.total
+    tolerance: 0
+
+  # 2. Grain integrity — CERT must be unique within a report date
+  - check: no_duplicate_cert_per_repdte
+    expect: 0
+
+  # 3. Economic truth test: charge-offs must spike in the credit crisis.
+  #    Validates we captured real data, not a plausible-looking artefact.
+  - check: crisis_signal
+    expression: mean(NTLNLSR where year in 2009,2010) / mean(NTLNLSR where year in 2005,2006)
+    expect_greater_than: 2.0
+
+validations:
+  - ASSET > 0
+  - NTLNLSR between -5 and 25          # rate as %, negative = net recoveries
+  - NCLNLSR between 0 and 100
+  - LNLSNET <= ASSET
+  - REPDTE is a quarter end
+
+notes: >
+  The by-category noncurrent and net-charge-off rates are the valuable part:
+  a bank-level quarterly panel of credit performance split by residential,
+  multifamily, CRE, construction, C&I, consumer and credit-card exposure,
+  running through the 2008-09 crisis. Usable directly as US portfolio PD
+  anchors and as the dependent variable for macro-satellite stress models.
+  Rates are percentages, not fractions — do not mix with fractional anchors
+  without converting.
