@@ -15,6 +15,7 @@ they don't fail the run.
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -49,6 +50,18 @@ SBA_TARGETS = [
         BROWSER_HEADERS,
     ),
     ("data.gov mirror", "https://catalog.data.gov/dataset/sba-7a-and-504-loan-data-reports", BROWSER_HEADERS),
+]
+
+# Indian sources. S-079 hit httpx.ConnectTimeout against ibbi.gov.in from a
+# US-east runner while the same host downloads normally from a dev machine —
+# testing whether Indian government hosts are reachable from US datacentres,
+# and how slow they are when they do respond.
+INDIA_TARGETS = [
+    ("IBBI publications listing", "https://ibbi.gov.in/publication", BROWSER_HEADERS),
+    ("IBBI home", "https://ibbi.gov.in/", BROWSER_HEADERS),
+    ("IBBI newsletter PDF (range req)", "https://ibbi.gov.in/uploads/publication/62bde7e8797a6a91abc577742098b840.pdf", BROWSER_HEADERS),
+    ("RBI main site", "https://www.rbi.org.in/", BROWSER_HEADERS),
+    ("NSE India", "https://www.nseindia.com/", BROWSER_HEADERS),
 ]
 
 PASS, FAIL, INFO = "  [PASS]", "  [FAIL]", "  [ ?? ]"
@@ -110,21 +123,38 @@ def check_motherduck(settings: Settings) -> bool:
         return False
 
 
+def probe(targets, timeout: float = 60.0) -> None:
+    """Time each target and report status, so slowness is distinguishable from blocking."""
+    for label, url, headers in targets:
+        started = time.monotonic()
+        try:
+            with httpx.Client(follow_redirects=True, timeout=timeout) as client:
+                # Range-limit so we never pull a large file during preflight.
+                resp = client.get(url, headers={**headers, "Range": "bytes=0-2047"})
+            elapsed = time.monotonic() - started
+            body = resp.text[:200].replace("\n", " ") if resp.content else ""
+            verdict = PASS if resp.status_code in (200, 206) else INFO
+            print(f"{verdict} {label}  [{elapsed:.1f}s]")
+            print(f"         HTTP {resp.status_code} · {resp.headers.get('content-type', '?')}")
+            if body:
+                print(f"         {body[:110]}…")
+        except Exception as exc:
+            elapsed = time.monotonic() - started
+            print(f"{INFO} {label}  [{elapsed:.1f}s]")
+            print(f"         {type(exc).__name__}: {exc}")
+
+
 def check_sba() -> None:
     section("3. data.sba.gov reachability (informational)")
     print("  Dev sandbox saw HTTP 404 on all routes. Testing from this runner:\n")
-    for label, url, headers in SBA_TARGETS:
-        try:
-            with httpx.Client(follow_redirects=True, timeout=60.0) as client:
-                # Range-limit so we never pull a multi-hundred-MB CSV during preflight.
-                resp = client.get(url, headers={**headers, "Range": "bytes=0-2047"})
-            body = resp.text[:200].replace("\n", " ")
-            verdict = PASS if resp.status_code in (200, 206) else INFO
-            print(f"{verdict} {label}")
-            print(f"         HTTP {resp.status_code} · {resp.headers.get('content-type', '?')}")
-            print(f"         {body[:120]}…")
-        except Exception as exc:
-            print(f"{INFO} {label}\n         {type(exc).__name__}: {exc}")
+    probe(SBA_TARGETS)
+
+
+def check_india() -> None:
+    section("4. Indian government hosts (informational)")
+    print("  S-079 hit ConnectTimeout on ibbi.gov.in from a US-east runner,")
+    print("  while the same host downloads normally from the dev machine.\n")
+    probe(INDIA_TARGETS, timeout=90.0)
 
 
 def main() -> int:
@@ -145,11 +175,13 @@ def main() -> int:
     r2_ok = check_r2(settings)
     md_ok = check_motherduck(settings)
     check_sba()
+    check_india()
 
     section("Summary")
     print(f"  Cloudflare R2 : {'OK' if r2_ok else 'FAILED'}")
     print(f"  MotherDuck    : {'OK' if md_ok else 'FAILED'}")
     print("  SBA route     : see section 3 — determines connector design")
+    print("  India hosts   : see section 4 — determines S-079 execution location")
 
     if r2_ok and md_ok:
         print("\n  Platform foundations are working.\n")
