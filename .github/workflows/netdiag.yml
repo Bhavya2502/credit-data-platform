@@ -1,0 +1,45 @@
+name: Network diagnostic
+
+# Fast, decisive test of why ibbi.gov.in is unreachable from GitHub runners.
+# Hypothesis: the host publishes an AAAA record that is unroutable from Azure,
+# and the client prefers IPv6 — a common cause of ConnectTimeout that a
+# forced-IPv4 connection fixes outright.
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Runner egress
+        run: curl -s --max-time 15 https://ipinfo.io/json || true
+
+      - name: DNS records for Indian hosts
+        run: |
+          for h in ibbi.gov.in www.rbi.org.in www.nseindia.com; do
+            echo "── $h"
+            echo -n "   A    : "; dig +short A "$h"    | tr '\n' ' '; echo
+            echo -n "   AAAA : "; dig +short AAAA "$h" | tr '\n' ' '; echo
+          done
+
+      - name: Connect tests (default vs forced IPv4)
+        run: |
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
+          for h in "https://ibbi.gov.in/publication" "https://www.rbi.org.in/" "https://www.nseindia.com/"; do
+            echo "── $h"
+            echo -n "   default : "
+            curl -s -o /dev/null --max-time 40 -w 'HTTP:%{http_code} connect:%{time_connect}s total:%{time_total}s\n' \
+                 -A "$UA" "$h" || echo "FAILED (exit $?)"
+            echo -n "   IPv4    : "
+            curl -4 -s -o /dev/null --max-time 40 -w 'HTTP:%{http_code} connect:%{time_connect}s total:%{time_total}s\n' \
+                 -A "$UA" "$h" || echo "FAILED (exit $?)"
+          done
+
+      - name: IBBI PDF range fetch (forced IPv4)
+        run: |
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
+          curl -4 -s -o /dev/null --max-time 60 -r 0-4095 \
+               -w 'HTTP:%{http_code} bytes:%{size_download} total:%{time_total}s\n' \
+               -A "$UA" "https://ibbi.gov.in/uploads/publication/62bde7e8797a6a91abc577742098b840.pdf" \
+            || echo "FAILED (exit $?)"
