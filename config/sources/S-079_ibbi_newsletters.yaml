@@ -1,0 +1,130 @@
+# ─────────────────────────────────────────────────────────────────────
+# S-079 · IBBI quarterly newsletters — case-level insolvency outcomes
+# The flagship differentiated dataset (PLATFORM_PLAN §2.2, D1).
+# India's only public workout-LGD micro data.
+# ─────────────────────────────────────────────────────────────────────
+
+id: S-079
+name: IBBI Quarterly Newsletters — case-level CIRP and liquidation outcomes
+publisher: Insolvency and Bankruptcy Board of India
+tier: 1                       # Indian government, public domain
+archetype: D                  # PDF table extraction — the hard one
+
+landing_page: https://ibbi.gov.in/en/publication
+listing_pages: 2              # paginated; crawl until 404
+
+portfolios: [corporate]
+parameters: [lgd, recovery_timing, default_events]
+geography: IN
+grain: case                   # one row per corporate debtor per outcome
+schedule: quarterly
+
+coverage:
+  from: 2016-Q4
+  to: current
+  editions_english: 37
+  note: >
+    Financial columns begin around 2019. Pre-2019 editions list case names and
+    dates only, so the LGD panel effectively starts 2019 while the case
+    identity series can reach back to 2016.
+
+# ── Discovery ────────────────────────────────────────────────────────
+# Filenames are opaque hashes carrying no date, so the listing table is the
+# only source of period metadata. Links are UNQUOTED in the HTML
+# (href=/uploads/...), which defeats naive href regexes.
+discovery:
+  method: listing_table_scrape
+  row_signature: "/uploads/publication/"
+  fields_from_listing: [period, title, url, size]
+  exclude: hindi
+
+fetch:
+  headers:
+    User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+  rate_limit_seconds: 3       # be gentle: files run to 36 MB
+  timeout_seconds: 600
+  retries: 3
+
+# ── Extraction ───────────────────────────────────────────────────────
+# Table NUMBER is unusable as an anchor: "Table 5" is CIRPs Yielding Resolution
+# Plans in 2026 but Claim Distribution and Reasons for Withdrawal in 2020.
+# Tables are located by HEADER COLUMN signature instead, and rows are parsed
+# from flattened row text because column geometry is unreliable — pdfplumber
+# splits "2292.53" into "2292." and "53 27.48" in the 2022 editions.
+extraction:
+  method: pdfplumber
+  locator: header_signature
+  row_parser: regex_on_row_text
+  tables:
+    - key: cirp_resolution
+      signature: ["Name of CD|Name of Corporate Debtor", "Admitted", "Liquidation Value|Realisable"]
+      target: silver.ibbi_cirp_cases
+    - key: liquidation
+      signature: ["Name of CD|Name of the Corporate Debtor", "Order of Liquidation", "Sale Proceeds"]
+      target: silver.ibbi_liquidation_cases
+    - key: voluntary_liquidation
+      signature: ["Name of Corporate", "Dissolut", "Liquidation Expense"]
+      target: silver.ibbi_voluntary_liquidation_cases
+  fallback: openrouter_vision   # not yet needed; deterministic parse covers 96%
+
+# ── Schema drift (must be preserved, not smoothed) ───────────────────
+schema_eras:
+  - era: "2019-2021"
+    columns: 11
+    claims_basis: financial_creditors_only   # "Total Admitted Claims of FCs"
+    fair_value: false
+  - era: "2022"
+    columns: 12
+    claims_basis: all_creditors
+    fair_value: true
+  - era: "2023-2026"
+    columns: 13
+    claims_basis: all_creditors
+    fair_value: true
+note_on_eras: >
+  The 2019-2021 editions report admitted claims of FINANCIAL CREDITORS ONLY,
+  later editions report all creditors. Recovery rates are therefore not
+  directly comparable across the break — comparing them without adjustment
+  produces a spurious downward trend in realisation. claims_basis is a
+  required column on every row.
+
+# ── Targets ──────────────────────────────────────────────────────────
+targets:
+  bronze: "bronze/S-079/{yyyy}/{mm}/{dd}/ibbi_newsletter_{period_slug}.pdf"
+  silver: silver.ibbi_cirp_cases
+  gold:
+    - gold.india_corporate_lgd_panel
+
+# ── Quality ──────────────────────────────────────────────────────────
+# Every row carries both amounts and the percentages they imply, so the
+# document validates its own parse. Rows failing this check are quarantined,
+# never silently dropped and never fed to the gold panel.
+reconciliation:
+  - check: arithmetic_self_consistency
+    expression: realisable_amount / admitted_claims * 100
+    against: pct_of_claims_printed
+    min_pass_rate: 0.90
+
+  - check: cumulative_realisation_vs_published
+    # Mar-2026 edition prints: claims Rs 14,13,662.82 cr, realisable
+    # Rs 4,31,987.12 cr, 30.56% / 166.85% / 94.56%, 1419 resolutions
+    against: published_cumulative_total
+    tolerance: 0.05
+
+  - check: case_count_vs_published
+    expected: 1419               # resolution plans approved till March 2026
+    tolerance: 0.10
+
+validations:
+  - admitted_claims_cr >= 0
+  - realisable_amount_cr >= 0
+  - cirp_commencement_date <= resolution_approval_date
+  - initiated_by in [FC, OC, CD]
+
+notes: >
+  Realisation ratios are cutoff-sensitive: cumulative realisation vs admitted
+  claims reads 33.7% (Jun-2025), 32.8% (Dec-2025), 30.6% (Mar-2026). Always
+  cite the edition. Two additional case-level tables (liquidation outcomes and
+  voluntary liquidations) were discovered during reconnaissance and are richer
+  LGD material than the resolution table: they carry actual sale proceeds and
+  amounts distributed, i.e. gone-concern recovery.
