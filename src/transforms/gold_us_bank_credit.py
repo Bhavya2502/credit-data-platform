@@ -59,22 +59,33 @@ SELECT
     round(median(LNATRESR), 4)                                     AS allowance_to_loans_median_pct,
     sum(ELNATR)                                                    AS provisions_thousands,
 
-    -- By-category net charge-off rates, loan-weighted.
-    -- Category denominators are not published, so total loans is used as the
-    -- weight: an approximation, and a far better one than an equal-weighted mean.
-    round(sum(NTRERESR * LNLSNET) / nullif(sum(CASE WHEN NTRERESR IS NOT NULL THEN LNLSNET END), 0), 4) AS nco_residential_pct,
-    round(sum(NTREMULR * LNLSNET) / nullif(sum(CASE WHEN NTREMULR IS NOT NULL THEN LNLSNET END), 0), 4) AS nco_multifamily_pct,
-    round(sum(NTRENRSR * LNLSNET) / nullif(sum(CASE WHEN NTRENRSR IS NOT NULL THEN LNLSNET END), 0), 4) AS nco_cre_nonresi_pct,
-    round(sum(NTRECOSR * LNLSNET) / nullif(sum(CASE WHEN NTRECOSR IS NOT NULL THEN LNLSNET END), 0), 4) AS nco_construction_pct,
-    round(sum(IDNTCIR   * LNLSNET) / nullif(sum(CASE WHEN IDNTCIR   IS NOT NULL THEN LNLSNET END), 0), 4) AS nco_ci_pct,
-    round(sum(IDNTCONR  * LNLSNET) / nullif(sum(CASE WHEN IDNTCONR  IS NOT NULL THEN LNLSNET END), 0), 4) AS nco_consumer_pct,
+    -- By-category rates, loan-weighted and winsorised.
+    --
+    -- Category loan balances are not published by this endpoint, so total loans
+    -- is used as the weight. That approximation over-weights a bank whose
+    -- category book is tiny relative to its balance sheet: a large percentage
+    -- swing on a near-empty construction book carries the weight of the bank's
+    -- entire loan portfolio. Unwinsorised, this produced a -14.25% system
+    -- construction charge-off rate for 2018 — a single-institution artefact.
+    --
+    -- Winsorising each bank's rate to [-10%, 60%] before weighting removes those
+    -- artefacts while preserving genuine distress (construction peaked near 4%
+    -- in 2010, well inside the band). Treat category series as well-founded
+    -- indicators rather than exact system rates; the headline weighted series
+    -- above, which uses published numerator and denominator, is exact.
+    round(sum(least(greatest(NTRERESR,-10),60) * LNLSNET) / nullif(sum(CASE WHEN NTRERESR IS NOT NULL THEN LNLSNET END), 0), 4) AS nco_residential_pct,
+    round(sum(least(greatest(NTREMULR,-10),60) * LNLSNET) / nullif(sum(CASE WHEN NTREMULR IS NOT NULL THEN LNLSNET END), 0), 4) AS nco_multifamily_pct,
+    round(sum(least(greatest(NTRENRSR,-10),60) * LNLSNET) / nullif(sum(CASE WHEN NTRENRSR IS NOT NULL THEN LNLSNET END), 0), 4) AS nco_cre_nonresi_pct,
+    round(sum(least(greatest(NTRECOSR,-10),60) * LNLSNET) / nullif(sum(CASE WHEN NTRECOSR IS NOT NULL THEN LNLSNET END), 0), 4) AS nco_construction_pct,
+    round(sum(least(greatest(IDNTCIR,  -10),60) * LNLSNET) / nullif(sum(CASE WHEN IDNTCIR   IS NOT NULL THEN LNLSNET END), 0), 4) AS nco_ci_pct,
+    round(sum(least(greatest(IDNTCONR, -10),60) * LNLSNET) / nullif(sum(CASE WHEN IDNTCONR  IS NOT NULL THEN LNLSNET END), 0), 4) AS nco_consumer_pct,
 
     -- Noncurrent (90+ dpd or nonaccrual) by category — a PD-side view
-    round(sum(NCRERESR * LNLSNET) / nullif(sum(CASE WHEN NCRERESR IS NOT NULL THEN LNLSNET END), 0), 4) AS noncurrent_residential_pct,
-    round(sum(NCRENRER * LNLSNET) / nullif(sum(CASE WHEN NCRENRER IS NOT NULL THEN LNLSNET END), 0), 4) AS noncurrent_cre_nonresi_pct,
-    round(sum(NCRECONR * LNLSNET) / nullif(sum(CASE WHEN NCRECONR IS NOT NULL THEN LNLSNET END), 0), 4) AS noncurrent_construction_pct,
-    round(sum(IDNCCIR  * LNLSNET) / nullif(sum(CASE WHEN IDNCCIR  IS NOT NULL THEN LNLSNET END), 0), 4) AS noncurrent_ci_pct,
-    round(sum(IDNCCONR * LNLSNET) / nullif(sum(CASE WHEN IDNCCONR IS NOT NULL THEN LNLSNET END), 0), 4) AS noncurrent_consumer_pct,
+    round(sum(least(greatest(NCRERESR,-10),60) * LNLSNET) / nullif(sum(CASE WHEN NCRERESR IS NOT NULL THEN LNLSNET END), 0), 4) AS noncurrent_residential_pct,
+    round(sum(least(greatest(NCRENRER,-10),60) * LNLSNET) / nullif(sum(CASE WHEN NCRENRER IS NOT NULL THEN LNLSNET END), 0), 4) AS noncurrent_cre_nonresi_pct,
+    round(sum(least(greatest(NCRECONR,-10),60) * LNLSNET) / nullif(sum(CASE WHEN NCRECONR IS NOT NULL THEN LNLSNET END), 0), 4) AS noncurrent_construction_pct,
+    round(sum(least(greatest(IDNCCIR, -10),60) * LNLSNET) / nullif(sum(CASE WHEN IDNCCIR  IS NOT NULL THEN LNLSNET END), 0), 4) AS noncurrent_ci_pct,
+    round(sum(least(greatest(IDNCCONR,-10),60) * LNLSNET) / nullif(sum(CASE WHEN IDNCCONR IS NOT NULL THEN LNLSNET END), 0), 4) AS noncurrent_consumer_pct,
 
     'S-057'                                                        AS _source_id,
     now()                                                          AS _built_at
@@ -157,6 +168,22 @@ def check(con) -> list[tuple[str, bool, str]]:
             "crisis_signal_preserved", ratio > 2.0,
             f"{benign:.3f}% (2005-06) → {crisis:.3f}% (2009-10), ratio {ratio:.2f}x",
         ))
+
+    # Category series must also be plausible after winsorising — this is the
+    # check that caught the -14.25% construction artefact.
+    cat_bad = con.execute(
+        f"""
+        SELECT count(*) FROM {GOLD_SYSTEM}
+        WHERE least(nco_residential_pct, nco_multifamily_pct, nco_cre_nonresi_pct,
+                    nco_construction_pct, nco_ci_pct, nco_consumer_pct) < -2
+           OR greatest(nco_residential_pct, nco_multifamily_pct, nco_cre_nonresi_pct,
+                       nco_construction_pct, nco_ci_pct, nco_consumer_pct) > 15
+        """
+    ).fetchone()[0]
+    results.append((
+        "category_rates_plausible", cat_bad == 0,
+        f"{cat_bad} quarter(s) with a category rate outside [-2%, 15%]",
+    ))
 
     # Quarterly continuity — no missing periods inside the covered range.
     gaps = con.execute(
