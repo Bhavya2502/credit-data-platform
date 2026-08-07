@@ -132,7 +132,11 @@ validations:
   - admitted_claims_cr >= 0
   - realisable_amount_cr >= 0
   - cirp_commencement_date <= resolution_approval_date
-  - initiated_by in [FC, OC, CD]
+  # RBI appears as a fourth initiator in the data: financial-service-provider
+  # insolvencies referred by the Reserve Bank under section 227 (Srei Equipment
+  # Finance, Reliance Capital). Not an extraction error — a real category the
+  # original three-value list did not anticipate.
+  - initiated_by in [FC, OC, CD, RBI]
 
 notes: >
   Realisation ratios are cutoff-sensitive: cumulative realisation vs admitted

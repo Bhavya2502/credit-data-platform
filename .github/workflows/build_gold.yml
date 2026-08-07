@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
   workflow_run:
     # Runs automatically after a successful source load.
-    workflows: ["S-057 FDIC BankFind"]
+    workflows: ["S-057 FDIC BankFind", "S-079 IBBI newsletters"]
     types: [completed]
 
 jobs:
