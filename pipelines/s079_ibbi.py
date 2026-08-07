@@ -31,6 +31,7 @@ from src.common.settings import Settings  # noqa: E402
 from src.common.storage import BronzeStore  # noqa: E402
 from src.connectors.ibbi_listing import Newsletter, discover, fetch_pdf  # noqa: E402
 from src.extractors.ibbi_cirp import extract_cases  # noqa: E402
+from src.extractors.ibbi_liquidation import extract_cases as extract_liquidation  # noqa: E402
 from src.extractors.vision import (  # noqa: E402
     DEFAULT_MODEL, extract_page, render_page_png, to_cirp_cases,
 )
@@ -38,6 +39,7 @@ from src.extractors.vision import (  # noqa: E402
 SOURCE_ID = "S-079"
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "sources" / "S-079_ibbi_newsletters.yaml"
 SILVER_TABLE = "silver.ibbi_cirp_cases"
+LIQ_TABLE = "silver.ibbi_liquidation_cases"
 
 # Claims basis changed with the 2022 editions — see config schema_eras.
 FC_ONLY_MAX_YEAR = 2021
@@ -105,6 +107,49 @@ def vision_extract(payload: bytes, nl: Newsletter, cfg: dict) -> list:
     return found
 
 
+def load_liquidation(con, liq_cases, nl: Newsletter, bronze_key: str, run_id: str) -> int:
+    """Load liquidation outcomes into their own silver table.
+
+    Validation here is structural only — this table prints no percentages to
+    reconcile against (see the extractor docstring), so validation_basis is
+    carried on every row to keep the weaker evidential standard visible.
+    """
+    rows = []
+    for c in liq_cases:
+        d = c.as_dict()
+        d["source_id"] = SOURCE_ID
+        d["source_year"] = nl.year
+        d["source_quarter"] = nl.quarter
+        d["source_url"] = nl.url
+        d["bronze_key"] = bronze_key
+        d["_fetched_at"] = datetime.now(timezone.utc)
+        rows.append(d)
+    df = pd.DataFrame(rows)
+
+    con.execute("CREATE SCHEMA IF NOT EXISTS silver")
+    con.register("incoming_liq", df)
+    exists = con.execute(
+        "SELECT count(*) FROM information_schema.tables "
+        "WHERE table_schema='silver' AND table_name='ibbi_liquidation_cases'"
+    ).fetchone()[0]
+    if not exists:
+        con.execute(f"CREATE TABLE {LIQ_TABLE} AS SELECT * FROM incoming_liq")
+    else:
+        con.execute(f"DELETE FROM {LIQ_TABLE} WHERE source_period = ?", [nl.period])
+        con.execute(f"INSERT INTO {LIQ_TABLE} BY NAME SELECT * FROM incoming_liq")
+    con.unregister("incoming_liq")
+
+    ok = int((df["structural_ok"] == True).sum())   # noqa: E712
+    bad = int((df["structural_ok"] == False).sum()) # noqa: E712
+    print(f"   liq       {len(df)} liquidation rows -> {LIQ_TABLE} (structural ok {ok}, failed {bad})")
+    catalog.record_qa(
+        con, run_id=run_id, source_id=SOURCE_ID, check_name="liquidation_structural",
+        observed=float(ok), expected=float(len(df)), tolerance=None,
+        passed=bad == 0, detail=f"{nl.slug}: {ok} ok / {bad} failed of {len(df)}",
+    )
+    return len(df)
+
+
 def process_edition(
     *, nl: Newsletter, store: BronzeStore, con, run_id: str, cfg: dict
 ) -> dict:
@@ -139,6 +184,17 @@ def process_edition(
         cases = vision_extract(payload, nl, cfg)
         extraction_method = "vision"
         stats = {"pages_scanned": ["vision"], "rows_parsed": len(cases), "totals_rows": []}
+
+    # Liquidation outcomes — gone-concern recovery, a separate table with its
+    # own grain. Extracted from the same bronze object, loaded independently so
+    # a failure in one table never blocks the other.
+    try:
+        with pdfplumber.open(io.BytesIO(payload)) as pdf:
+            liq_cases, liq_stats = extract_liquidation(pdf, nl.period)
+        if liq_cases:
+            load_liquidation(con, liq_cases, nl, bronze.key, run_id)
+    except Exception as exc:
+        print(f"   liq       FAILED {type(exc).__name__}: {exc}")
 
     if not cases:
         print("   extract   no case rows found (expected for pre-2019 editions)")
