@@ -35,16 +35,45 @@ from typing import Any
 DATE = r"\d{1,2}[-/]\d{1,2}[-/]\d{2,4}"
 NUM_TOKEN_RE = re.compile(r"-?[\d,]+\.?\d*|(?<![A-Za-z])-(?![A-Za-z])|NA|N\.A\.?", re.I)
 
-# IBBI's terminology shifts across editions: the 2020 tables head this column
-# "Name of CD" / "Name of the Corporate Debtor", the 2026 tables "Name of the
-# Corporate Person" — legally the correct term once liquidation has commenced.
-# Matching only the earlier wording silently returned zero rows for the whole
-# modern era.
-HEADER_SIGNATURE = (
-    r"Name\s+of\s+(?:the\s+)?(?:CD\b|Corporate\s+(?:Debtor|Person))",
-    r"Order\s+of\s+Liquidation",
-    r"Sale\s+Proceeds",
+CD_NAME = r"Name\s+of\s+(?:the\s+)?(?:CD\b|Corporate\s+(?:Debtor|Person))"
+
+# Header matching needs ALTERNATIVE signature sets, not one rigid pattern.
+# Two independent drifts defeat a single signature across a decade of editions:
+#
+#   * terminology — 2020 heads the column "Name of the Corporate Debtor",
+#     2026 "Name of the Corporate Person" (legally correct once liquidation
+#     commences)
+#   * header geometry — the 2022 editions use SPANNING cells, so the
+#     sub-column names collapse into "Amount (in Rs crore)" and the strings
+#     "Order of Liquidation" and "Sale Proceeds" are simply absent. There the
+#     table title "Details of Closed Liquidations" is the reliable anchor.
+#
+# A table matches if ANY set matches in full. Failing closed on a strict
+# signature does not error — it silently yields zero rows, which is the most
+# dangerous failure mode in this whole pipeline.
+HEADER_SIGNATURE_SETS: tuple[tuple[str, ...], ...] = (
+    (CD_NAME, r"Order\s+of\s+Liquidation", r"Sale\s+Proceeds"),   # 2019-21, 2023+
+    (CD_NAME, r"Closed\s+Liquidations"),                          # 2022 spanning headers
 )
+
+# Negative signature — reject the CIRP RESOLUTION table, which otherwise passes
+# a loose positive match: it shares "Name of Corporate Debtor", "Amount (in Rs
+# crore)" and "Date of" with the liquidation table. A generic third fallback on
+# those tokens pulled 45 resolution rows into the 2026 liquidation set and
+# inflated 2022 from 0 to 97 rows of the wrong kind.
+#
+# Contaminating liquidation (the bad tail) with resolution cases (the good tail)
+# is worse than missing an edition: it silently biases every recovery statistic
+# upward, and nothing downstream would flag it.
+EXCLUDE_SIGNATURE = (
+    r"Realisable",
+    r"Fair\s+Value",
+    r"Yielding\s+Resolution",
+    r"Resolution\s+Plan",
+)
+
+# Kept for callers/tests that reference the original single signature
+HEADER_SIGNATURE = HEADER_SIGNATURE_SETS[0]
 
 
 @dataclass
@@ -172,16 +201,52 @@ def map_numerics(toks: list[str]) -> dict[str, float | None]:
     return out
 
 
+def header_matches(header: str) -> bool:
+    """True when the header satisfies ANY signature set and no exclusion."""
+    if any(re.search(p, header, re.I) for p in EXCLUDE_SIGNATURE):
+        return False  # it is the CIRP resolution table, not a liquidation table
+    return any(
+        all(re.search(p, header, re.I) for p in signature)
+        for signature in HEADER_SIGNATURE_SETS
+    )
+
+
+TITLE_ANCHOR = r"Details\s+of\s+Closed\s+Liquidations"
+
+
 def find_table_pages(pdf) -> list[int]:
+    """Locate liquidation tables by header signature, with a page-title fallback.
+
+    The 2022 Q2/Q3 editions defeat header-only matching twice over: spanning
+    cells remove the sub-column names, AND the caption "Table 3: Details of
+    Closed Liquidations" sits in the page text OUTSIDE the table structure, so
+    extract_tables() never returns it. Checking the page title as well recovers
+    those editions, while the exclusion list still keeps the CIRP resolution
+    table out.
+    """
     pages: list[int] = []
     for i, page in enumerate(pdf.pages):
         try:
             tables = page.extract_tables()
         except Exception:
             continue
+        page_text = page.extract_text() or ""
+        title_present = bool(re.search(TITLE_ANCHOR, page_text, re.I))
+
         for table in tables or []:
-            header = " ".join(str(c or "") for row in (table[:3] or []) for c in row)
-            if all(re.search(p, header, re.I) for p in HEADER_SIGNATURE):
+            # Scan more header rows than before: the 2022 spanning layout pushes
+            # sub-column names down, and a title row can sit above the columns.
+            header = " ".join(str(c or "") for row in (table[:4] or []) for c in row)
+            if header_matches(header):
+                pages.append(i + 1)
+                break
+            # Title fallback — only for tables that name a corporate debtor and
+            # carry none of the resolution-table markers.
+            if (
+                title_present
+                and re.search(CD_NAME, header, re.I)
+                and not any(re.search(p, header, re.I) for p in EXCLUDE_SIGNATURE)
+            ):
                 pages.append(i + 1)
                 break
     return pages
