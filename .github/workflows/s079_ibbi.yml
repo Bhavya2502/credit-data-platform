@@ -56,4 +56,5 @@ jobs:
         run: |
           python pipelines/s079_ibbi.py \
             --mode "${{ inputs.mode || 'latest' }}" \
-            --limit "${{ inputs.limit || '0' }}"
+            --limit "${{ inputs.limit || '0' }}" \
+            --periods ${{ inputs.periods }}

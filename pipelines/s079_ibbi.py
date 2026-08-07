@@ -206,6 +206,15 @@ def reconcile(con, run_id: str) -> list[tuple[str, bool, str]]:
     """Check the assembled panel against IBBI's own published cumulative totals."""
     results: list[tuple[str, bool, str]] = []
 
+    exists = con.execute(
+        "SELECT count(*) FROM information_schema.tables "
+        "WHERE table_schema='silver' AND table_name='ibbi_cirp_cases'"
+    ).fetchone()[0]
+    if not exists:
+        # Nothing loaded yet (e.g. a filtered run that matched no editions).
+        # Report it rather than raising a catalog error from a downstream query.
+        return [("table_exists", False, f"{SILVER_TABLE} does not exist — no editions loaded")]
+
     total, distinct = con.execute(
         f"SELECT count(*), count(DISTINCT lower(corporate_debtor)) FROM {SILVER_TABLE}"
     ).fetchone()
