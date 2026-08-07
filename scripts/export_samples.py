@@ -180,6 +180,25 @@ def main() -> int:
                   "Rows that failed the arithmetic self-check, with the reason — "
                   "excluded from modelling, retained for inspection", manifest)
 
+        # ── 8c. India corporate LGD gold panel ────────────────────────
+        if con.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_schema='gold' AND table_name='india_corporate_lgd_panel'"
+        ).fetchone()[0]:
+            write(con.execute(
+                    "SELECT * FROM gold.india_corporate_lgd_panel ORDER BY admitted_claims_cr DESC"
+                  ).fetch_df(),
+                  "14_gold_india_corporate_lgd_panel.csv",
+                  "COMPLETE: modelling-ready India corporate LGD panel — recovery rate, LGD, "
+                  "workout duration, going-concern premium, size band and vintage per case",
+                  manifest)
+            write(con.execute(
+                    "SELECT * FROM gold.india_corporate_lgd_summary ORDER BY dimension, segment"
+                  ).fetch_df(),
+                  "15_gold_india_lgd_summary.csv",
+                  "COMPLETE: recovery and LGD curves by size band, initiator, year and "
+                  "claims basis — weighted and median side by side", manifest)
+
         # ── 9. Column dictionary for the silver panel ─────────────────
         cols = con.execute(
             """
