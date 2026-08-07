@@ -149,6 +149,37 @@ def main() -> int:
               f"SAMPLE: {SAMPLE_ROWS:,} random rows across all banks and quarters "
               "— representative of the full 1.09m-row panel", manifest)
 
+        # ── 8b. IBBI case-level insolvency outcomes (the flagship set) ─
+        if con.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_schema='silver' AND table_name='ibbi_cirp_cases'"
+        ).fetchone()[0]:
+            ibbi = con.execute(
+                "SELECT * FROM silver.ibbi_cirp_cases "
+                "ORDER BY source_year, source_quarter, sl_no"
+            ).fetch_df()
+            write(ibbi, "11_ibbi_cirp_cases_FULL.csv",
+                  "COMPLETE: case-level Indian insolvency outcomes — every corporate debtor "
+                  "with admitted claims, liquidation/fair value, realised amount and dates. "
+                  "India's only public workout-LGD micro dataset.", manifest)
+
+            validated = con.execute(
+                "SELECT * FROM silver.ibbi_cirp_cases WHERE arithmetic_ok "
+                "ORDER BY admitted_claims_cr DESC NULLS LAST"
+            ).fetch_df()
+            write(validated, "12_ibbi_cirp_validated_only.csv",
+                  "MODELLING SET: only rows that reconcile against their own printed "
+                  "percentages — use this one for LGD work", manifest)
+
+            quarantine = con.execute(
+                "SELECT source_period, corporate_debtor, extraction_method, arithmetic_detail, "
+                "admitted_claims_cr, realisable_amount_cr, pct_of_claims, raw_row "
+                "FROM silver.ibbi_cirp_cases WHERE arithmetic_ok = FALSE"
+            ).fetch_df()
+            write(quarantine, "13_ibbi_quarantined_rows.csv",
+                  "Rows that failed the arithmetic self-check, with the reason — "
+                  "excluded from modelling, retained for inspection", manifest)
+
         # ── 9. Column dictionary for the silver panel ─────────────────
         cols = con.execute(
             """
