@@ -20,6 +20,7 @@ lxml~=5.3
 # ── Document extraction (archetype D) ────────────────────────────────
 pdfplumber~=0.11         # text-layer PDF tables — first choice
 camelot-py~=0.11         # ruled-table extraction — second choice
+pymupdf~=1.24            # page rendering for vision extraction; 2nd text engine
 opencv-python-headless~=4.10   # camelot dependency
 
 # ── Config & validation ──────────────────────────────────────────────
