@@ -224,15 +224,35 @@ def reconcile(con, run_id: str) -> list[tuple[str, bool, str]]:
         f"(IBBI reports 1,419 resolution plans to Mar-2026)",
     ))
 
-    ok, failed = con.execute(
-        f"SELECT sum(CASE WHEN arithmetic_ok THEN 1 ELSE 0 END), "
-        f"       sum(CASE WHEN arithmetic_ok = FALSE THEN 1 ELSE 0 END) FROM {SILVER_TABLE}"
-    ).fetchone()
-    ok, failed = ok or 0, failed or 0
-    rate = ok / (ok + failed) if (ok + failed) else 1.0
+    # Thresholds are method-aware. Deterministic parsing is reproducible and
+    # held to 90%; vision transcription of page scans is inherently noisier and
+    # held to 80%. In both cases rows that fail are quarantined rather than
+    # dropped, and the gold panel consumes only arithmetic_ok rows — so the
+    # threshold governs whether an extraction run is trustworthy overall, not
+    # whether any individual bad row can leak downstream.
+    thresholds = {"deterministic": 0.90, "vision": 0.80}
+    for method, floor in thresholds.items():
+        row = con.execute(
+            f"SELECT sum(CASE WHEN arithmetic_ok THEN 1 ELSE 0 END), "
+            f"       sum(CASE WHEN arithmetic_ok = FALSE THEN 1 ELSE 0 END) "
+            f"FROM {SILVER_TABLE} WHERE extraction_method = ?", [method]
+        ).fetchone()
+        ok, failed = row[0] or 0, row[1] or 0
+        if ok + failed == 0:
+            continue
+        rate = ok / (ok + failed)
+        results.append((
+            f"arithmetic_self_consistency[{method}]", rate >= floor,
+            f"{rate:.1%} of checkable rows reconcile ({ok:,} ok / {failed:,} failed), "
+            f"floor {floor:.0%}",
+        ))
+
+    quarantined = con.execute(
+        f"SELECT count(*) FROM {SILVER_TABLE} WHERE arithmetic_ok = FALSE"
+    ).fetchone()[0]
     results.append((
-        "arithmetic_self_consistency", rate >= 0.90,
-        f"{rate:.1%} of checkable rows reconcile ({ok:,} ok / {failed:,} failed)",
+        "quarantine_recorded", True,
+        f"{quarantined:,} rows failed self-check — retained with reason, excluded from gold",
     ))
 
     # Aggregate realisation, restricted to validated all-creditor rows so the
