@@ -199,6 +199,22 @@ def main() -> int:
                   "COMPLETE: recovery and LGD curves by size band, initiator, year and "
                   "claims basis — weighted and median side by side", manifest)
 
+        # ── 8d. IBBI liquidation outcomes (gone-concern recovery) ─────
+        if con.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_schema='silver' AND table_name='ibbi_liquidation_cases'"
+        ).fetchone()[0]:
+            write(con.execute(
+                    "SELECT * FROM silver.ibbi_liquidation_cases "
+                    "ORDER BY admitted_claims_cr DESC NULLS LAST"
+                  ).fetch_df(),
+                  "16_ibbi_liquidation_cases.csv",
+                  "COMPLETE: gone-concern recovery — admitted claims, liquidation value, "
+                  "actual sale proceeds and amounts distributed per liquidated corporate "
+                  "person. NOTE validation_basis='structural_only': this table prints no "
+                  "percentages, so rows cannot self-reconcile the way CIRP rows do.",
+                  manifest)
+
         # ── 9. Column dictionary for the silver panel ─────────────────
         cols = con.execute(
             """
