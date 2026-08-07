@@ -31,6 +31,9 @@ from src.common.settings import Settings  # noqa: E402
 from src.common.storage import BronzeStore  # noqa: E402
 from src.connectors.ibbi_listing import Newsletter, discover, fetch_pdf  # noqa: E402
 from src.extractors.ibbi_cirp import extract_cases  # noqa: E402
+from src.extractors.vision import (  # noqa: E402
+    DEFAULT_MODEL, extract_page, render_page_png, to_cirp_cases,
+)
 
 SOURCE_ID = "S-079"
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "sources" / "S-079_ibbi_newsletters.yaml"
@@ -49,6 +52,57 @@ def claims_basis(year: int | None) -> str:
     if year is None:
         return "unknown"
     return "financial_creditors_only" if year <= FC_ONLY_MAX_YEAR else "all_creditors"
+
+
+def vision_extract(payload: bytes, nl: Newsletter, cfg: dict) -> list:
+    """Read an image-only edition with a vision model (archetype H).
+
+    Scans a bounded page window rather than the whole document: the resolution
+    table has sat in the Corporate Processes section of every edition, so
+    scanning ~12 pages instead of 30 halves the cost with no loss of coverage.
+    Pages that do not contain the table return no rows and cost a few hundred
+    tokens each.
+    """
+    import fitz
+
+    vcfg = (cfg.get("extraction") or {}).get("vision") or {}
+    first = int(vcfg.get("page_from", 10))
+    last = int(vcfg.get("page_to", 26))
+    dpi = int(vcfg.get("dpi", 200))
+    model = vcfg.get("model", DEFAULT_MODEL)
+
+    doc = fitz.open(stream=payload, filetype="pdf")
+    found: list = []
+    tokens_in = tokens_out = 0
+    cost = 0.0
+    scanned = 0
+
+    try:
+        for idx in range(first - 1, min(last, len(doc))):
+            png = render_page_png(doc, idx, dpi=dpi)
+            result = extract_page(png, page_number=idx + 1, model=model)
+            scanned += 1
+            if result.error:
+                print(f"     p{idx+1}: vision error — {result.error[:110]}")
+                continue
+            tokens_in += result.prompt_tokens
+            tokens_out += result.completion_tokens
+            if result.cost_usd:
+                cost += float(result.cost_usd)
+            if result.rows:
+                cases = to_cirp_cases(result, nl.period, idx + 1)
+                if cases:
+                    found.extend(cases)
+                    print(f"     p{idx+1}: {len(cases)} case rows")
+    finally:
+        doc.close()
+
+    ok = sum(1 for c in found if c.arithmetic_ok is True)
+    bad = sum(1 for c in found if c.arithmetic_ok is False)
+    print(f"   vision    {scanned} pages scanned · {len(found)} rows "
+          f"(arithmetic ok {ok}, failed {bad}) · tokens {tokens_in:,}/{tokens_out:,}"
+          + (f" · ${cost:.4f}" if cost else ""))
+    return found
 
 
 def process_edition(
@@ -70,6 +124,21 @@ def process_edition(
 
     with pdfplumber.open(io.BytesIO(payload)) as pdf:
         cases, stats = extract_cases(pdf, nl.period)
+        text_chars = sum(
+            len(pdf.pages[i].extract_text() or "")
+            for i in range(0, len(pdf.pages), max(1, len(pdf.pages) // 5))
+        )
+
+    extraction_method = "deterministic"
+
+    # Escalate to vision only when the document has no text layer at all
+    # (ADR-005: deterministic first, vision last). Seven IBBI editions are
+    # page scans; a parser cannot read what has no characters.
+    if not cases and text_chars < 200:
+        print(f"   note      no text layer ({text_chars} chars) — escalating to vision")
+        cases = vision_extract(payload, nl, cfg)
+        extraction_method = "vision"
+        stats = {"pages_scanned": ["vision"], "rows_parsed": len(cases), "totals_rows": []}
 
     if not cases:
         print("   extract   no case rows found (expected for pre-2019 editions)")
@@ -89,6 +158,7 @@ def process_edition(
         d["source_url"] = nl.url
         d["bronze_key"] = bronze.key
         d["claims_basis"] = claims_basis(nl.year)
+        d["extraction_method"] = extraction_method
         d["_fetched_at"] = datetime.now(timezone.utc)
         rows.append(d)
     df = pd.DataFrame(rows)

@@ -65,7 +65,20 @@ extraction:
     - key: voluntary_liquidation
       signature: ["Name of Corporate", "Dissolut", "Liquidation Expense"]
       target: silver.ibbi_voluntary_liquidation_cases
-  fallback: openrouter_vision   # not yet needed; deterministic parse covers 96%
+  # Seven editions (2022Q1, 2023Q1-Q4, 2024Q1-Q2) are page scans with NO text
+  # layer -- pdfplumber and PyMuPDF both return zero characters. These cover
+  # IBC's heaviest resolution years, so skipping them would bias the panel.
+  vision:
+    when: no_text_layer          # never as a shortcut on parsable documents
+    model: google/gemini-2.5-flash
+    dpi: 200
+    page_from: 10                # resolution table sits in Corporate Processes
+    page_to: 26
+    validation: same_arithmetic_check_as_deterministic
+    note: >
+      Vision output is a hypothesis, not data. Every row faces the same
+      arithmetic self-check; failures are quarantined and every row records
+      extraction_method so provenance stays visible downstream.
 
 # ── Schema drift (must be preserved, not smoothed) ───────────────────
 schema_eras:

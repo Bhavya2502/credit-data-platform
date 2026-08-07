@@ -5,14 +5,18 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "latest = 2 newest editions · backfill = all 37"
+        description: "latest = 2 newest · backfill = all 37 · periods = specific"
         type: choice
-        options: [latest, backfill]
+        options: [latest, backfill, periods]
         default: latest
       limit:
         description: "Cap editions processed (0 = no cap)"
         type: string
         default: "0"
+      periods:
+        description: "Space-separated slugs, e.g. 2024Q1 2023Q2 (mode=periods)"
+        type: string
+        default: ""
   schedule:
     # IBBI publishes roughly two months after quarter end.
     - cron: "0 4 20 3,6,9,12 *"
