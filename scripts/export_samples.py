@@ -215,6 +215,23 @@ def main() -> int:
                   "percentages, so rows cannot self-reconcile the way CIRP rows do.",
                   manifest)
 
+        # ── 8e. Section 53 waterfall + voluntary liquidations ─────────
+        for tbl, fname, desc in [
+            ("silver.ibbi_liquidation_waterfall", "17_ibbi_waterfall_section53.csv",
+             "COMPLETE: seniority-conditional recovery — how liquidation proceeds split "
+             "across statutory claim ranks (s.52, s.53(1)(a)-(h)). block='closed' carries "
+             "real recovery; block='ongoing' has no distribution yet and NULL recovery."),
+            ("silver.ibbi_voluntary_liquidations", "18_ibbi_voluntary_liquidations.csv",
+             "COMPLETE: solvent companies winding up. NOT credit-loss events — creditors "
+             "are paid in full in most cases. Never pool with insolvency recoveries."),
+        ]:
+            name = tbl.split(".", 1)[1]
+            if con.execute(
+                "SELECT count(*) FROM information_schema.tables "
+                "WHERE table_schema='silver' AND table_name=?", [name]
+            ).fetchone()[0]:
+                write(con.execute(f"SELECT * FROM {tbl}").fetch_df(), fname, desc, manifest)
+
         # ── 9. Column dictionary for the silver panel ─────────────────
         cols = con.execute(
             """
