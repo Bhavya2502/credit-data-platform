@@ -32,6 +32,7 @@ from src.common.storage import BronzeStore  # noqa: E402
 from src.connectors.ibbi_listing import Newsletter, discover, fetch_pdf  # noqa: E402
 from src.extractors.ibbi_cirp import extract_cases  # noqa: E402
 from src.extractors.ibbi_liquidation import extract_cases as extract_liquidation  # noqa: E402
+from src.extractors.ibbi_supplementary import extract_voluntary, extract_waterfall  # noqa: E402
 from src.extractors.vision import (  # noqa: E402
     DEFAULT_MODEL, extract_page, render_page_png, to_cirp_cases,
 )
@@ -40,6 +41,8 @@ SOURCE_ID = "S-079"
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "sources" / "S-079_ibbi_newsletters.yaml"
 SILVER_TABLE = "silver.ibbi_cirp_cases"
 LIQ_TABLE = "silver.ibbi_liquidation_cases"
+WATERFALL_TABLE = "silver.ibbi_liquidation_waterfall"
+VOLUNTARY_TABLE = "silver.ibbi_voluntary_liquidations"
 
 # Claims basis changed with the 2022 editions — see config schema_eras.
 FC_ONLY_MAX_YEAR = 2021
@@ -150,6 +153,39 @@ def load_liquidation(con, liq_cases, nl: Newsletter, bronze_key: str, run_id: st
     return len(df)
 
 
+def load_table(con, records, table: str, nl: Newsletter, bronze_key: str, label: str) -> int:
+    """Load any supplementary record set into its own silver table, idempotent per edition."""
+    if not records:
+        return 0
+    rows = []
+    for c in records:
+        d = c.as_dict()
+        d["source_id"] = SOURCE_ID
+        d["source_year"] = nl.year
+        d["source_quarter"] = nl.quarter
+        d["source_url"] = nl.url
+        d["bronze_key"] = bronze_key
+        d["_fetched_at"] = datetime.now(timezone.utc)
+        rows.append(d)
+    df = pd.DataFrame(rows)
+
+    con.execute("CREATE SCHEMA IF NOT EXISTS silver")
+    con.register("incoming_tbl", df)
+    name = table.split(".", 1)[1]
+    exists = con.execute(
+        "SELECT count(*) FROM information_schema.tables "
+        "WHERE table_schema='silver' AND table_name=?", [name]
+    ).fetchone()[0]
+    if not exists:
+        con.execute(f"CREATE TABLE {table} AS SELECT * FROM incoming_tbl")
+    else:
+        con.execute(f"DELETE FROM {table} WHERE source_period = ?", [nl.period])
+        con.execute(f"INSERT INTO {table} BY NAME SELECT * FROM incoming_tbl")
+    con.unregister("incoming_tbl")
+    print(f"   {label:<9} {len(df)} rows -> {table}")
+    return len(df)
+
+
 def process_edition(
     *, nl: Newsletter, store: BronzeStore, con, run_id: str, cfg: dict
 ) -> dict:
@@ -195,6 +231,16 @@ def process_edition(
             load_liquidation(con, liq_cases, nl, bronze.key, run_id)
     except Exception as exc:
         print(f"   liq       FAILED {type(exc).__name__}: {exc}")
+
+    # Section 53 waterfall and voluntary liquidations — completing the source.
+    try:
+        with pdfplumber.open(io.BytesIO(payload)) as pdf:
+            wf, _ = extract_waterfall(pdf, nl.period)
+            vl, _ = extract_voluntary(pdf, nl.period)
+        load_table(con, wf, WATERFALL_TABLE, nl, bronze.key, "waterfall")
+        load_table(con, vl, VOLUNTARY_TABLE, nl, bronze.key, "voluntary")
+    except Exception as exc:
+        print(f"   supp      FAILED {type(exc).__name__}: {exc}")
 
     if not cases:
         print("   extract   no case rows found (expected for pre-2019 editions)")
