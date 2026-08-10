@@ -27,6 +27,36 @@ class CheckResult:
     detail: str
 
 
+def enforce_declared(
+    declared: list[str], produced: list[tuple[str, bool, str]]
+) -> list[tuple[str, bool, str]]:
+    """Fail any declared check that produced no verdict.
+
+    Checks are normally written as `if <data available>: results.append(...)`,
+    which means a check whose input is empty simply never appends — it vanishes.
+    Nothing fails, so the load reports success.
+
+    This bit us on S-014: a parsing bug emptied the 12-month default column, so
+    both the default-rate check and the rating-discrimination check silently did
+    not run, and a dataset with a completely empty modelling target passed on
+    row counts alone.
+
+    A check that cannot be evaluated is not a pass. It is an unknown, and an
+    unknown must block the load exactly like a failure — otherwise "all checks
+    passed" means only "no check happened to look".
+    """
+    seen = {name for name, _, _ in produced}
+    out = list(produced)
+    for name in declared:
+        if name not in seen:
+            out.append((
+                name, False,
+                "NOT EVALUATED — the check produced no verdict, usually because its "
+                "input column was empty or missing. Treated as a failure.",
+            ))
+    return out
+
+
 def run_fdic_checks(con, table: str) -> list[CheckResult]:
     """Reconciliation suite for S-057 (FDIC BankFind)."""
     results: list[CheckResult] = []

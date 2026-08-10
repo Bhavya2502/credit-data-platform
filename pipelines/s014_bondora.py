@@ -27,6 +27,7 @@ from src.common import catalog  # noqa: E402
 from src.common.settings import Settings  # noqa: E402
 from src.common.storage import BronzeStore  # noqa: E402
 from src.connectors.bulk_file import cleanup, download, probe  # noqa: E402
+from src.quality.checks import enforce_declared  # noqa: E402
 
 SOURCE_ID = "S-014"
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "sources" / "S-014_bondora.yaml"
@@ -47,6 +48,30 @@ NUM_COLS = ["issued_amount", "initial_interest_rate", "nr_of_payments", "princip
 def load_config() -> dict:
     with CONFIG_PATH.open(encoding="utf-8") as fh:
         return yaml.safe_load(fh)
+
+
+def _to_bool(v):
+    """Coerce bool / int / float / string representations to a nullable boolean.
+
+    Missing stays missing: NULL in this dataset carries meaning (a 12-month
+    default outcome that is not yet observable) and must never become False.
+    """
+    import math
+
+    if v is None:
+        return pd.NA
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        if isinstance(v, float) and math.isnan(v):
+            return pd.NA
+        return bool(v)
+    s = str(v).strip().lower()
+    if s in {"true", "1", "1.0", "yes", "y", "t"}:
+        return True
+    if s in {"false", "0", "0.0", "no", "n", "f"}:
+        return False
+    return pd.NA
 
 
 def read_workbook(path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -96,10 +121,16 @@ def normalise(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
             # NULL must survive. For has_default_within_12_months NULL means
             # "not yet measurable", NOT "no default" — coercing it to False
             # understates the default rate and biases any PD model.
-            mapped = df[col].astype(str).str.strip().str.lower().map(
-                {"true": True, "false": False, "1": True, "0": False}
-            )
-            df[col] = mapped.astype("boolean")
+            #
+            # These columns are NOT uniformly typed in the source:
+            #   is_default                    -> Python bool + None
+            #   has_default_within_12_months  -> int 0/1 + None
+            # Because ~23% are None, pandas widens the int column to float64,
+            # so 0 becomes 0.0 and str(0.0) == "0.0". A string-based lookup on
+            # {"true","false","1","0"} therefore mapped EVERY value to NULL and
+            # emptied the target column while the load still reported success.
+            # Convert by value, not by string.
+            df[col] = df[col].map(_to_bool).astype("boolean")
 
     if "has_default_within_12_months" in df.columns:
         n_null = int(df["has_default_within_12_months"].isna().sum())
@@ -108,6 +139,15 @@ def normalise(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     df["_source_id"] = SOURCE_ID
     df["_fetched_at"] = datetime.now(timezone.utc)
     return df, notes
+
+
+DECLARED_CHECKS = [
+    "row_count",
+    "default_rate_plausible",
+    "risk_rating_orders_defaults",
+    "issued_amount_positive",
+    "coverage",
+]
 
 
 def reconcile(con, cfg: dict) -> list[tuple[str, bool, str]]:
@@ -182,7 +222,9 @@ def reconcile(con, cfg: dict) -> list[tuple[str, bool, str]]:
         "coverage", True,
         f"{cov[0]} to {cov[1]} across {cov[2]} countries",
     ))
-    return results
+
+    # Any declared check that produced no verdict becomes an explicit failure.
+    return enforce_declared(DECLARED_CHECKS, results)
 
 
 def main() -> int:
