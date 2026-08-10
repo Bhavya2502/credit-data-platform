@@ -40,3 +40,5 @@ ruff~=0.7
 #   openai           — OpenRouter client for LLM-assisted extraction (archetype H)
 #   playwright       — browser automation (archetype F)
 #   dbt-duckdb       — once silver exceeds ~20 tables
+
+openpyxl~=3.1            # Bondora XLSX (read-only streaming)

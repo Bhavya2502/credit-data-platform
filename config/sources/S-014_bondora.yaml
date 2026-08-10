@@ -1,0 +1,128 @@
+# ─────────────────────────────────────────────────────────────────────
+# S-014 · Bondora / Go&Grow public loan dataset
+# Borrower-level European consumer credit: 789k loans with BOTH a
+# Basel-shaped 12-month default target AND realised repayment amounts.
+# ─────────────────────────────────────────────────────────────────────
+
+id: S-014
+name: Bondora (Go&Grow) public loan dataset
+publisher: Go&Grow OU (formerly Bondora, Estonia)
+tier: 1                       # published openly for investor transparency
+archetype: A                  # bulk file download
+
+landing_page: https://goandgrow.eu/en/public-statistics/
+# The old bondora.com/en/public-statistics now redirects here, and
+# api.bondora.com is DEAD (returns nothing). The blob URL is the only live route.
+download_url: https://sabanners001.blob.core.windows.net/statistics/public/loan_dataset_investor.xlsx
+
+portfolios: [personal]
+parameters: [pd, lgd, ead, recovery_timing]
+geography: EE, FI, ES, NL     # multi-country; `country` column carries it
+grain: loan                   # one row per loan, current state (not a panel)
+schedule: monthly             # file is refreshed; Last-Modified tracks it
+
+coverage:
+  from: 2009-02
+  to: current
+  rows_verified_2026_08: 789145
+  columns: 31
+  file_size_mb: 155
+  note: >
+    Verified 2026-08-08: 789,145 loans, Last-Modified 2026-08-10, so the file
+    is actively maintained rather than a frozen archive.
+
+# ── SCHEMA CHANGE — do not trust older documentation ─────────────────
+# The widely-cited Bondora schema (EAD1, EAD2, PrincipalRecovery,
+# InterestRecovery, RecoveryStage, PascalCase) NO LONGER EXISTS. The current
+# file is 31 snake_case columns with different semantics. A pipeline written
+# against the documented field names fails outright.
+schema_note: >
+  Old schema: EAD1/EAD2/PrincipalRecovery/InterestRecovery/RecoveryStage.
+  Current schema: snake_case, no explicit recovery-stage field; recovery must
+  be derived from repaid_amount_total against issued_amount / principal_debt.
+
+fetch:
+  method: GET
+  headers:
+    User-Agent: "credit-data-platform/0.1 (internal research)"
+  timeout_seconds: 900        # ~155 MB, took ~3 min from the dev machine
+  retries: 3
+
+targets:
+  bronze: "bronze/S-014/{yyyy}/{mm}/{dd}/bondora_loan_dataset.xlsx"
+  silver: silver.bondora_loans
+  silver_dictionary: silver.bondora_dictionary
+  gold:
+    - gold.consumer_credit_panel
+
+# ── Key fields (from the file's own Dataset Dictionary sheet) ────────
+fields:
+  identity: [loan_id, country, loan_issued_at]
+  # has_default_within_12_months is a Basel-shaped PD target: "default observed
+  # in 12 MOB, NULL if not measurable yet" — the NULL handling is correct and
+  # must be preserved, not filled. Immature loans are not non-defaults.
+  pd_target: [has_default_within_12_months, is_default, days_past_due_principal, loan_status, loan_status_risk]
+  lgd_components: [issued_amount, principal_balance, principal_debt, principal_paid_total,
+                   repaid_amount_total, interest_paid_total, late_fee_paid_total]
+  timing: [debt_occured_date_local, months_in_default, months_on_book,
+           initial_loan_duration, early_repaid_at, is_early_repaid_within_14_days]
+  scorecard: [combined_income, initial_interest_rate, nr_of_payments, customer_risk_rating]
+  lender_view: [customer_risk_rating, projected_npv_return]
+
+# ── Traps documented in the source's own dictionary ─────────────────
+caveats:
+  - field: debt_occured_date_local
+    issue: >
+      "Principal debt start date (is dynamic and is updated when customer has
+      paid enough to cover principal for some payments)". This is NOT a stable
+      default date — it moves when a borrower catches up. Do not use it to
+      define default cohorts or to compute time-to-default; use
+      has_default_within_12_months for cohort work and months_in_default for
+      duration.
+  - field: has_default_within_12_months
+    issue: >
+      NULL means "not yet measurable" (loan younger than 12 months on book),
+      NOT "no default". Filling NULL with False understates the default rate
+      and biases any PD model trained on it.
+  - field: repaid_amount_total
+    issue: Excludes late fees; do not treat as total cash received.
+  - field: principal_debt
+    issue: >
+      The dictionary sheet spells this "principal_dept"; the data column is
+      "principal_debt". Match on the data, not the dictionary.
+  - field: _grain
+    issue: >
+      One row per loan at CURRENT state — not a monthly panel. Behavioural
+      scorecards needing payment histories require a different source
+      (Amex/Home Credit).
+
+# ── Quality ─────────────────────────────────────────────────────────
+reconciliation:
+  - check: row_count
+    expected: 789145
+    tolerance: 0.15           # file grows as loans are issued
+
+  # Truth check: the lender's OWN risk rating should order realised defaults.
+  # If default rates do not rise across worsening grades, either the parse is
+  # wrong or the rating does not discriminate — both worth knowing.
+  - check: risk_rating_orders_defaults
+    expression: default rate by customer_risk_rating is monotonically increasing
+    min_rank_correlation: 0.7
+
+  - check: default_rate_plausible
+    expression: mean(has_default_within_12_months) where not null
+    plausible_range: [0.02, 0.40]
+
+validations:
+  - issued_amount > 0
+  - repaid_amount_total >= 0
+  - months_in_default IS NULL OR months_in_default >= 0
+  - loan_issued_at <= now()
+
+notes: >
+  Complements S-079 (IBBI): corporate workout recoveries there, retail here —
+  both on realised amounts rather than assumptions. Unlike most public consumer
+  datasets this carries a correctly-specified 12-month default target AND the
+  repayment amounts needed to derive loss, so PD and LGD can be modelled from
+  one table. customer_risk_rating additionally allows validating a lender's
+  internal grades against realised outcomes, which is rarely possible publicly.
