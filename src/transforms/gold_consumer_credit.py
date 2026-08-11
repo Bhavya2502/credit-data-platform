@@ -97,10 +97,35 @@ SELECT
          THEN round(greatest(100.0 - least(100.0 * principal_paid_total / issued_amount, 100.0), 0.0), 4) END
                                                            AS lgd_principal_pct,
 
-    -- Has the outcome settled? A loan still in default is still recovering, so
-    -- its recovery-to-date is a lower bound on final recovery, not an estimate
-    -- of it.
-    (loan_status IN ('Repaid', 'Returned'))                AS recovery_complete,
+    -- ── LGD population (corrected) ───────────────────────────────────
+    -- The LGD population must be defined by DEFAULT status, not by settled
+    -- status. A loan that defaults and is never recovered stays in status
+    -- 'Defaulted' forever and never becomes 'Repaid', so filtering on
+    -- "settled" silently keeps only CURED defaults — a cure population, not a
+    -- loss population. That produced a median LGD of 0% and an LGD that fell
+    -- as grades worsened (AA 41% → G 20%), which is backwards.
+    --
+    --   default_open   defaulted, still in 'Defaulted' status. Recovery is
+    --                  ongoing, so recovery-to-date is a LOWER bound and the
+    --                  LGD shown is an UPPER bound on final loss.
+    --   default_cured  defaulted, subsequently reached 'Repaid'/'Returned'.
+    --                  Outcome is final; loss is typically near zero.
+    --   no_default     no default observed in the 12-month window.
+    --   not_measurable loan too young for a 12-month outcome.
+    --
+    -- True portfolio LGD lies between the open and cured figures; both are
+    -- reported rather than blended into one misleading number.
+    CASE
+        WHEN has_default_within_12_months IS NULL           THEN 'not_measurable'
+        WHEN NOT has_default_within_12_months               THEN 'no_default'
+        WHEN loan_status IN ('Repaid', 'Returned')          THEN 'default_cured'
+        ELSE                                                     'default_open'
+    END                                                    AS default_status,
+
+    -- Final only when the workout has actually concluded.
+    (has_default_within_12_months
+     AND loan_status IN ('Repaid', 'Returned'))            AS lgd_is_final,
+
     months_in_default,
 
     projected_npv_return,
@@ -133,16 +158,27 @@ SELECT
     round(100.0 * avg(CASE WHEN default_12m THEN 1.0 ELSE 0.0 END)
           FILTER (WHERE default_12m_measurable), 3)                AS default_rate_12m_pct,
 
-    -- LGD: settled outcomes only, otherwise recovery is still in progress
-    count(*) FILTER (WHERE recovery_complete)                      AS lgd_observable,
-    round(median(lgd_principal_pct) FILTER (WHERE recovery_complete), 3)
-                                                                   AS lgd_median_pct,
-    round(avg(lgd_principal_pct) FILTER (WHERE recovery_complete), 3)
-                                                                   AS lgd_mean_pct,
+    -- ── LGD, reported by default status rather than blended ──────────
+    count(*) FILTER (WHERE default_status IN ('default_open', 'default_cured'))
+                                                                   AS defaults_total,
+    count(*) FILTER (WHERE default_status = 'default_open')         AS defaults_open,
+    count(*) FILTER (WHERE default_status = 'default_cured')        AS defaults_cured,
+    round(100.0 * count(*) FILTER (WHERE default_status = 'default_cured')
+          / nullif(count(*) FILTER (WHERE default_status IN ('default_open','default_cured')), 0), 2)
+                                                                   AS cure_rate_pct,
 
-    -- Loss rate on defaulted-and-settled loans: the quantity ECL actually needs
-    round(avg(lgd_principal_pct) FILTER (WHERE recovery_complete AND default_12m), 3)
-                                                                   AS lgd_given_default_pct,
+    -- Whole default population, mixing final and in-progress outcomes.
+    -- The headline LGD, but read it with the split below.
+    round(avg(lgd_principal_pct)
+          FILTER (WHERE default_status IN ('default_open', 'default_cured')), 3)
+                                                                   AS lgd_all_defaults_pct,
+    -- Still recovering: an UPPER bound on final loss.
+    round(avg(lgd_principal_pct) FILTER (WHERE default_status = 'default_open'), 3)
+                                                                   AS lgd_open_upper_pct,
+    -- Concluded workouts: final loss, typically near zero.
+    round(avg(lgd_principal_pct) FILTER (WHERE default_status = 'default_cured'), 3)
+                                                                   AS lgd_cured_final_pct,
+
     round(median(months_in_default) FILTER (WHERE months_in_default IS NOT NULL), 1)
                                                                    AS months_in_default_median,
 
@@ -170,6 +206,7 @@ DECLARED_CHECKS = [
     "rating_discriminates",
     "pd_censoring_preserved",
     "vintage_coverage",
+    "lgd_population_correct",
 ]
 
 
@@ -225,6 +262,33 @@ def check(con) -> list[tuple[str, bool, str]]:
     results.append((
         "vintage_coverage", (cov[2] or 0) >= 10,
         f"vintages {cov[0]}-{cov[1]} ({cov[2]} years)",
+    ))
+
+    # The LGD population must contain OPEN defaults, not only cured ones.
+    # Defining it by settled status kept cures only, giving a 0% median LGD and
+    # an LGD that fell as grades worsened. If open defaults ever vanish from the
+    # population again, that regression must fail loudly.
+    row = con.execute(
+        f"""
+        SELECT count(*) FILTER (WHERE default_status = 'default_open'),
+               count(*) FILTER (WHERE default_status = 'default_cured'),
+               avg(lgd_principal_pct) FILTER (WHERE default_status = 'default_open'),
+               avg(lgd_principal_pct) FILTER (WHERE default_status = 'default_cured')
+        FROM {GOLD_PANEL}
+        """
+    ).fetchone()
+    n_open, n_cured, lgd_open, lgd_cured = row[0] or 0, row[1] or 0, row[2], row[3]
+    total_def = n_open + n_cured
+    open_share = n_open / total_def if total_def else 0
+    # Open defaults must be present, and their loss must exceed cured losses —
+    # a cure by definition recovered, so anything else means the split is wrong.
+    ok = n_open > 0 and (lgd_open is None or lgd_cured is None or lgd_open > lgd_cured)
+    results.append((
+        "lgd_population_correct", ok,
+        f"{n_open:,} open + {n_cured:,} cured defaults ({open_share:.1%} open); "
+        f"LGD open {lgd_open:.1f}% vs cured {lgd_cured:.1f}%"
+        if lgd_open is not None and lgd_cured is not None
+        else f"{n_open:,} open + {n_cured:,} cured defaults",
     ))
 
     return enforce_declared(DECLARED_CHECKS, results)
