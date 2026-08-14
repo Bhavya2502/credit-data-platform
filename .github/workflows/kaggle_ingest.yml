@@ -1,0 +1,73 @@
+name: Kaggle ingest
+
+# Borrower-level credit datasets from Kaggle. One target per run so a large
+# download cannot block a small one.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Which dataset to ingest"
+        type: choice
+        options:
+          - ltfs_vehicle
+          - home_credit_default
+          - lending_club
+          - home_credit_stability
+          - amex_default
+        default: ltfs_vehicle
+      sample_rows:
+        description: "Cap rows parsed per file (0 = all). Use for the multi-GB sets."
+        type: string
+        default: "0"
+      max_bronze_mb:
+        description: "Skip raw bronze upload above this size (MB)"
+        type: string
+        default: "2048"
+
+concurrency:
+  group: kaggle-ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Free up disk space
+        # Multi-GB archives plus their extracted contents need more room than
+        # the default runner image leaves free.
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost || true
+          df -h /
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "boto3~=1.35" "duckdb~=1.1" "httpx~=0.27" "tenacity~=9.0" \
+                      "pandas~=2.2" "pyarrow~=17.0" "pyyaml~=6.0"
+
+      - name: Ingest
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          python pipelines/kaggle_ingest.py \
+            --target "${{ inputs.target }}" \
+            --sample-rows "${{ inputs.sample_rows }}" \
+            --max-bronze-mb "${{ inputs.max_bronze_mb }}"
