@@ -61,6 +61,33 @@ def find_target(key: str):
     raise SystemExit(f"Unknown target '{key}'. Options: {', '.join(t.key for t in TARGETS)}")
 
 
+def downcast_floats(df: pd.DataFrame, threshold_cols: int = 80) -> tuple[pd.DataFrame, str]:
+    """Halve memory on very wide numeric frames by using float32.
+
+    Amex carries 190 mostly-float columns; at 3M rows that is ~4.5 GB as
+    float64 before pandas overhead and the DuckDB handoff, which OOM-killed the
+    runner. float32 holds ~7 significant digits.
+
+    Applied only to WIDE frames (many columns), which in practice means the
+    anonymised, pre-normalised feature matrices where that precision is
+    irrelevant. Narrow frames carrying monetary amounts are left at float64,
+    because rounding money silently is not a trade worth making for memory.
+    """
+    if len(df.columns) < threshold_cols:
+        return df, ""
+    float_cols = [c for c in df.columns if str(df[c].dtype) == "float64"]
+    if not float_cols:
+        return df, ""
+    before = df.memory_usage(deep=True).sum() / 1_073_741_824
+    for c in float_cols:
+        df[c] = df[c].astype("float32")
+    after = df.memory_usage(deep=True).sum() / 1_073_741_824
+    return df, (
+        f"downcast {len(float_cols)} float64 columns to float32 "
+        f"({before:.2f} GB -> {after:.2f} GB)"
+    )
+
+
 def read_member(zf: zipfile.ZipFile, name: str, sample_rows: int | None) -> pd.DataFrame | None:
     """Read one archive member, sampling from the top if capped."""
     lower = name.lower()
@@ -221,6 +248,9 @@ def main() -> int:
                 df, trim_note = trim_partial_entity(df, was_capped)
                 if trim_note:
                     print(f"     {trim_note}")
+                df, cast_note = downcast_floats(df)
+                if cast_note:
+                    print(f"     {cast_note}")
 
                 df["_source_id"] = source_id
                 df["_kaggle_ref"] = target.ref
