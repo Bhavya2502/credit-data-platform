@@ -18,13 +18,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.common import catalog  # noqa: E402
 from src.common.settings import Settings  # noqa: E402
 from src.transforms import (  # noqa: E402
-    gold_consumer_credit, gold_india_corporate_lgd, gold_us_bank_credit,
+    gold_consumer_credit, gold_india_corporate_lgd, gold_india_retail_pd,
+    gold_us_bank_credit,
 )
 
 BUILDERS = {
     "us_bank_credit": gold_us_bank_credit,
     "india_corporate_lgd": gold_india_corporate_lgd,
     "consumer_credit": gold_consumer_credit,
+    "india_retail_pd": gold_india_retail_pd,
 }
 
 
