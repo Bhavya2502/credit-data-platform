@@ -74,11 +74,29 @@ def read_member(zf: zipfile.ZipFile, name: str, sample_rows: int | None) -> pd.D
             return df
         if lower.endswith((".csv", ".txt", ".tsv")):
             sep = "\t" if lower.endswith(".tsv") else ","
-            with zf.open(name) as fh:
-                return pd.read_csv(
-                    fh, sep=sep, nrows=sample_rows or None,
-                    low_memory=False, on_bad_lines="skip",
-                )
+            # Encoding is not guaranteed. Home Credit's column-description file
+            # is cp1252 and failed outright on a UTF-8-only read, silently
+            # costing us the data dictionary for 128 columns — and dictionaries
+            # have been the most valuable part of every dataset so far (LTFS's
+            # revealed seven sentinel values masquerading as bureau scores).
+            # Try the common encodings before giving up.
+            last_error: Exception | None = None
+            for encoding in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+                try:
+                    with zf.open(name) as fh:
+                        df = pd.read_csv(
+                            fh, sep=sep, nrows=sample_rows or None,
+                            low_memory=False, on_bad_lines="skip",
+                            encoding=encoding,
+                        )
+                    if encoding != "utf-8":
+                        print(f"     (read {Path(name).name} as {encoding})")
+                    return df
+                except UnicodeDecodeError as exc:
+                    last_error = exc
+                    continue
+            if last_error:
+                raise last_error
     except Exception as exc:
         print(f"     ! could not read {name}: {type(exc).__name__}: {exc}")
     return None
