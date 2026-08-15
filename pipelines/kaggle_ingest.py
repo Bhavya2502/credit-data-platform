@@ -102,6 +102,38 @@ def read_member(zf: zipfile.ZipFile, name: str, sample_rows: int | None) -> pd.D
     return None
 
 
+# Entity keys used by the panel datasets. When a row cap truncates a file, the
+# final entity is almost always cut mid-history.
+ENTITY_KEYS = ("customer_ID", "customer_id", "SK_ID_CURR", "case_id", "SK_ID_PREV")
+
+
+def trim_partial_entity(df: pd.DataFrame, capped: bool) -> tuple[pd.DataFrame, str]:
+    """Drop the last entity's rows when a row cap has truncated the file.
+
+    Amex and Home Credit Stability are monthly PANELS: many rows per customer.
+    Reading the first N rows cuts the final customer mid-history, producing a
+    borrower whose statement sequence just stops — which looks like a real
+    observation and silently corrupts any behavioural feature built from it
+    (recency, trend, months-on-book).
+
+    Cutting at the entity boundary costs one customer and preserves the
+    integrity of every remaining history.
+    """
+    if not capped:
+        return df, ""
+    for col in ENTITY_KEYS:
+        if col in df.columns and len(df) > 1:
+            last = df[col].iloc[-1]
+            keep = df[df[col] != last]
+            if len(keep) and len(keep) < len(df):
+                return keep, (
+                    f"trimmed {len(df) - len(keep):,} rows of the final (truncated) "
+                    f"{col} to keep every retained history complete"
+                )
+            break
+    return df, ""
+
+
 def safe_table_name(key: str, member: str) -> str:
     stem = Path(member).stem.lower()
     stem = "".join(c if c.isalnum() else "_" for c in stem).strip("_")
@@ -185,10 +217,15 @@ def main() -> int:
                 if df is None or df.empty:
                     continue
 
+                was_capped = bool(sample and len(df) >= sample)
+                df, trim_note = trim_partial_entity(df, was_capped)
+                if trim_note:
+                    print(f"     {trim_note}")
+
                 df["_source_id"] = source_id
                 df["_kaggle_ref"] = target.ref
                 df["_archive_member"] = member
-                df["_is_sampled"] = bool(sample and len(df) >= (sample or 0))
+                df["_is_sampled"] = was_capped
                 df["_bronze_key"] = bronze_key
                 df["_fetched_at"] = datetime.now(timezone.utc)
 
